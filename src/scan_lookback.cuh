@@ -128,9 +128,9 @@ __global__ void ScanLookbackWarpKernel(
     // Step 3: Last warp does the decoupled lookback
     const int warp_idx = threadIdx.x / warpSize;
     const int lane = threadIdx.x % warpSize;
-    constexpr int LAST_WARP = BLOCK_SIZE / warpSize - 1;
+    int last_warp = BLOCK_SIZE / warpSize - 1;
 
-    if (warp_idx == LAST_WARP) {
+    if (warp_idx == last_warp) {
         // Get tile aggregate from last thread
         const int tile_aggregate = __shfl_sync(0xFFFFFFFF, value, warpSize - 1);
 
@@ -276,9 +276,9 @@ __global__ void ScanLookbackWarpCoarsenedKernel(
     // Step 6: Warp lookback
     const int warp_idx = threadIdx.x / warpSize;
     const int lane = threadIdx.x % warpSize;
-    constexpr int LAST_WARP = BLOCK_SIZE / warpSize - 1;
+    int last_warp = BLOCK_SIZE / warpSize - 1;
 
-    if (warp_idx == LAST_WARP) {
+    if (warp_idx == last_warp) {
         // Publish aggregate
         if (lane == warpSize - 1) {
             TileDescriptor my_info;
