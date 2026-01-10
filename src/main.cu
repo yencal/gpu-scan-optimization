@@ -62,8 +62,8 @@ int main(int argc, char** argv)
     RunBenchmark<ScanLookbackWarp<BLOCK_SIZE>>(
         "Lookback (warp)", n, peak_bandwidth);
 
-    // RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, ITEMS_PER_THREAD>>(
-    //     "Lookback (warp + coarsened)", n, peak_bandwidth);
+    RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, ITEMS_PER_THREAD>>(
+        "Lookback (warp + coarsened)", n, peak_bandwidth);
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "Benchmark complete" << std::endl;
