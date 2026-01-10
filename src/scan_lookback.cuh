@@ -280,7 +280,7 @@ __global__ void ScanLookbackWarpCoarsenedKernel(
     // Step 6: Warp lookback
     const int warp_idx = threadIdx.x / warpSize;
     const int lane = threadIdx.x % warpSize;
-    constexpr int LAST_WARP = BLOCK_SIZE / warpSize - 1;
+    int LAST_WARP = BLOCK_SIZE / warpSize - 1;
 
     if (warp_idx == LAST_WARP) {
         // Publish aggregate
