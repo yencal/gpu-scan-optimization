@@ -164,38 +164,28 @@ __global__ void ScanLookbackWarpKernel(
                     } while (pred_info.status == TileStatus::INVALID);
                 }
 
-                // Find which lanes found PREFIX
                 const unsigned prefix_mask = __ballot_sync(0xFFFFFFFF, 
                     pred_info.status == TileStatus::PREFIX);
+                const int prefix_lane = __ffs(prefix_mask) - 1;  // -1 if none found
 
-                if (prefix_mask == 0) {
-                    // All 32 were AGGREGATE - sum all and continue lookback
-                    int sum = pred_info.value;
-                    #pragma unroll
-                    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-                        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
-                    }
-                    sum = __shfl_sync(0xFFFFFFFF, sum, 0);
-                    exclusive_prefix += sum;
-                    lookback_base -= warpSize;
-                    continue;
-                }
+                // Include all lanes if no PREFIX found, otherwise lanes 0..prefix_lane
+                int contribution = (prefix_lane < 0 || lane <= prefix_lane) ? pred_info.value : 0;
 
-                // Found at least one PREFIX - sum up to it and done
-                const int prefix_lane = __ffs(prefix_mask) - 1;
-
-                int contribution = (lane <= prefix_lane) ? pred_info.value : 0;
-
+                // XOR reduction - all lanes get the sum
                 #pragma unroll
-                for (int offset = 1; offset < warpSize; offset *= 2) {
-                    int tmp = __shfl_up_sync(0xFFFFFFFF, contribution, offset);
-                    if (lane >= offset) {
-                        contribution += tmp;
-                    }
+                for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+                    contribution += __shfl_xor_sync(0xFFFFFFFF, contribution, offset);
                 }
 
-                exclusive_prefix += __shfl_sync(0xFFFFFFFF, contribution, prefix_lane);
-                break;
+                exclusive_prefix += contribution;
+
+                // If we found any PREFIX, we're done
+                if (prefix_lane >= 0) {
+                    break;
+                }
+
+                // All 32 were AGGREGATE, continue to earlier tiles
+                lookback_base -= warpSize;
             }
 
             if (lane == 0) {
