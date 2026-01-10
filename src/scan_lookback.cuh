@@ -321,7 +321,7 @@ __global__ void ScanLookbackWarpCoarsenedKernel(
 
                 // XOR reduction - all lanes get the sum
                 #pragma unroll
-                for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+                for (int offset = warpSize / 2; offset > 0; offset /= 2) {
                     contribution += __shfl_xor_sync(0xFFFFFFFF, contribution, offset);
                 }
 
@@ -333,7 +333,7 @@ __global__ void ScanLookbackWarpCoarsenedKernel(
                 }
 
                 // All 32 were AGGREGATE, continue to earlier tiles
-                lookback_base -= WARP_SIZE;
+                lookback_base -= warpSize;
             }
 
             if (lane == 0) {
