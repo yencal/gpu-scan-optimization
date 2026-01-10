@@ -7,7 +7,7 @@
 #include "utils.cuh"
 #include "scan_multi_kernel.cuh"
 #include "scan_chained.cuh"
-// #include "scan_lookback.cuh"
+#include "scan_lookback.cuh"
 
 int main(int argc, char** argv)
 {
@@ -56,14 +56,14 @@ int main(int argc, char** argv)
     RunBenchmark<ScanChained<BLOCK_SIZE>>(
         "Chained scan (serialized)", n, peak_bandwidth);
 
-    // RunBenchmark<ScanLookbackSingleThread<BLOCK_SIZE>>(
-    //     "Lookback (single-thread)", n, peak_bandwidth);
+    RunBenchmark<ScanLookbackSingleThread<BLOCK_SIZE>>(
+        "Lookback (single-thread)", n, peak_bandwidth);
 
-    // RunBenchmark<ScanLookbackWarp<BLOCK_SIZE>>(
-    //     "Lookback (warp)", n, peak_bandwidth);
+    RunBenchmark<ScanLookbackWarp<BLOCK_SIZE>>(
+        "Lookback (warp)", n, peak_bandwidth);
 
-    // RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, ITEMS_PER_THREAD>>(
-    //     "Lookback (warp + coarsened)", n, peak_bandwidth);
+    RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, ITEMS_PER_THREAD>>(
+        "Lookback (warp + coarsened)", n, peak_bandwidth);
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "Benchmark complete" << std::endl;
