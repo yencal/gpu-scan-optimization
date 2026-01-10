@@ -173,9 +173,9 @@ __global__ void ScanLookbackWarpKernel(
                     int sum = pred_info.value;
                     #pragma unroll
                     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-                        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+                        sum += __shfl_xor_sync(0xFFFFFFFF, sum, offset);
                     }
-                    sum = __shfl_sync(0xFFFFFFFF, sum, 0);
+                    // sum = __shfl_sync(0xFFFFFFFF, sum, 0);
                     exclusive_prefix += sum;
                     lookback_base -= warpSize;
                     continue;
