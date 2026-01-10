@@ -17,6 +17,8 @@
 #include "scan_primitives.cuh"
 #include "tile_descriptor.cuh"
 
+constexpr int WARP_SIZE = 32;
+
 // ============================================================================
 // KERNEL: DECOUPLED LOOKBACK (SINGLE THREAD)
 // ============================================================================
@@ -126,16 +128,16 @@ __global__ void ScanLookbackWarpKernel(
     value = BlockScanInclusive<BLOCK_SIZE>(value);
 
     // Step 3: Last warp does the decoupled lookback
-    const int warp_idx = threadIdx.x / warpSize;
-    const int lane = threadIdx.x % warpSize;
-    int last_warp = BLOCK_SIZE / warpSize - 1;
+    const int warp_idx = threadIdx.x / WARP_SIZE;
+    const int lane = threadIdx.x % WARP_SIZE;
+    constexpr int LAST_WARP = BLOCK_SIZE / WARP_SIZE - 1;
 
-    if (warp_idx == last_warp) {
+    if (warp_idx == LAST_WARP) {
         // Get tile aggregate from last thread
-        const int tile_aggregate = __shfl_sync(0xFFFFFFFF, value, warpSize - 1);
+        const int tile_aggregate = __shfl_sync(0xFFFFFFFF, value, WARP_SIZE - 1);
 
         // Publish aggregate (only one thread writes)
-        if (lane == warpSize - 1) {
+        if (lane == WARP_SIZE - 1) {
             TileDescriptor my_info;
             my_info.value = tile_aggregate;
             my_info.status = (tile_idx == 0) ? TileStatus::PREFIX : TileStatus::AGGREGATE;
@@ -167,31 +169,35 @@ __global__ void ScanLookbackWarpKernel(
                 // Find which lanes found PREFIX
                 const unsigned prefix_mask = __ballot_sync(0xFFFFFFFF, 
                     pred_info.status == TileStatus::PREFIX);
+
+                if (prefix_mask == 0) {
+                    // All 32 were AGGREGATE - sum all and continue lookback
+                    int sum = pred_info.value;
+                    #pragma unroll
+                    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+                        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+                    }
+                    sum = __shfl_sync(0xFFFFFFFF, sum, 0);
+                    exclusive_prefix += sum;
+                    lookback_base -= WARP_SIZE;
+                    continue;
+                }
+
+                // Found at least one PREFIX - sum up to it and done
                 const int prefix_lane = __ffs(prefix_mask) - 1;
 
-                // Sum values from lane 0 through prefix_lane
                 int contribution = (lane <= prefix_lane) ? pred_info.value : 0;
 
-                // Warp inclusive scan to sum contributions
                 #pragma unroll
-                for (int offset = 1; offset < warpSize; offset *= 2) {
+                for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
                     int tmp = __shfl_up_sync(0xFFFFFFFF, contribution, offset);
                     if (lane >= offset) {
                         contribution += tmp;
                     }
                 }
 
-                // Get sum from prefix_lane
-                const int iteration_sum = __shfl_sync(0xFFFFFFFF, contribution, prefix_lane);
-                exclusive_prefix += iteration_sum;
-
-                // Done if we found PREFIX or reached beginning
-                if (prefix_lane < warpSize - 1 || my_lookback_idx <= 0) {
-                    break;
-                }
-
-                // All 32 were AGGREGATE, continue lookback
-                lookback_base -= warpSize;
+                exclusive_prefix += __shfl_sync(0xFFFFFFFF, contribution, prefix_lane);
+                break;
             }
 
             if (lane == 0) {
@@ -199,7 +205,7 @@ __global__ void ScanLookbackWarpKernel(
             }
 
             // Upgrade to PREFIX
-            if (lane == warpSize - 1) {
+            if (lane == WARP_SIZE - 1) {
                 TileDescriptor my_info;
                 my_info.value = exclusive_prefix + tile_aggregate;
                 my_info.status = TileStatus::PREFIX;
@@ -274,13 +280,13 @@ __global__ void ScanLookbackWarpCoarsenedKernel(
         items[ITEMS_PER_THREAD - 1], BLOCK_SIZE - 1);
 
     // Step 6: Warp lookback
-    const int warp_idx = threadIdx.x / warpSize;
-    const int lane = threadIdx.x % warpSize;
-    int last_warp = BLOCK_SIZE / warpSize - 1;
+    const int warp_idx = threadIdx.x / WARP_SIZE;
+    const int lane = threadIdx.x % WARP_SIZE;
+    constexpr int LAST_WARP = BLOCK_SIZE / WARP_SIZE - 1;
 
-    if (warp_idx == last_warp) {
+    if (warp_idx == LAST_WARP) {
         // Publish aggregate
-        if (lane == warpSize - 1) {
+        if (lane == WARP_SIZE - 1) {
             TileDescriptor my_info;
             my_info.value = tile_aggregate;
             my_info.status = (tile_idx == 0) ? TileStatus::PREFIX : TileStatus::AGGREGATE;
@@ -310,33 +316,41 @@ __global__ void ScanLookbackWarpCoarsenedKernel(
 
                 const unsigned prefix_mask = __ballot_sync(0xFFFFFFFF, 
                     pred_info.status == TileStatus::PREFIX);
+
+                if (prefix_mask == 0) {
+                    // All 32 were AGGREGATE - sum all and continue lookback
+                    int sum = pred_info.value;
+                    #pragma unroll
+                    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+                        sum += __shfl_down_sync(0xFFFFFFFF, sum, offset);
+                    }
+                    sum = __shfl_sync(0xFFFFFFFF, sum, 0);
+                    exclusive_prefix += sum;
+                    lookback_base -= WARP_SIZE;
+                    continue;
+                }
+
                 const int prefix_lane = __ffs(prefix_mask) - 1;
 
                 int contribution = (lane <= prefix_lane) ? pred_info.value : 0;
 
                 #pragma unroll
-                for (int offset = 1; offset < warpSize; offset *= 2) {
+                for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
                     int tmp = __shfl_up_sync(0xFFFFFFFF, contribution, offset);
                     if (lane >= offset) {
                         contribution += tmp;
                     }
                 }
 
-                const int iteration_sum = __shfl_sync(0xFFFFFFFF, contribution, prefix_lane);
-                exclusive_prefix += iteration_sum;
-
-                if (prefix_lane < warpSize - 1 || my_lookback_idx <= 0) {
-                    break;
-                }
-
-                lookback_base -= warpSize;
+                exclusive_prefix += __shfl_sync(0xFFFFFFFF, contribution, prefix_lane);
+                break;
             }
 
             if (lane == 0) {
                 s_prefix = exclusive_prefix;
             }
 
-            if (lane == warpSize - 1) {
+            if (lane == WARP_SIZE - 1) {
                 TileDescriptor my_info;
                 my_info.value = exclusive_prefix + tile_aggregate;
                 my_info.status = TileStatus::PREFIX;
