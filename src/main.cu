@@ -8,6 +8,7 @@
 #include "scan_multi_kernel.cuh"
 #include "scan_chained.cuh"
 #include "scan_lookback.cuh"
+#include "scan_cub.cuh"
 
 int main(int argc, char** argv)
 {
@@ -88,6 +89,12 @@ int main(int argc, char** argv)
 
     RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 4>>(
         "Lookback (warp + vectorized x16)", n, peak_bandwidth);
+
+    // ========================================================================
+    // CUB DeviceScan
+    // ========================================================================
+    RunBenchmark<ScanCUB>(
+        "CUB DeviceScan", n, peak_bandwidth);
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "Benchmark complete" << std::endl;
