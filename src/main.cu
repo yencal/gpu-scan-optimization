@@ -93,6 +93,7 @@ int main(int argc, char** argv)
     // ========================================================================
     // CUB DeviceScan
     // ========================================================================
+    
     RunBenchmark<ScanCUB>(
         "CUB DeviceScan", n, peak_bandwidth);
 
