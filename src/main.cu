@@ -86,6 +86,9 @@ int main(int argc, char** argv)
     RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 3>>(
         "Lookback (warp + vectorized x12)", n, peak_bandwidth);
 
+    RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 4>>(
+        "Lookback (warp + vectorized x16)", n, peak_bandwidth);
+
     std::cout << "\n========================================" << std::endl;
     std::cout << "Benchmark complete" << std::endl;
     std::cout << "========================================" << std::endl;
