@@ -29,7 +29,6 @@ static __device__ __forceinline__ int WarpScanInclusive(int value)
 // BLOCK SCAN (INCLUSIVE)
 // ============================================================================
 // Two-level scan: warp scan within warps, then scan warp totals.
-// Requires log2(BLOCK_SIZE/32) shared memory elements.
 
 template<int BLOCK_SIZE>
 static __device__ __forceinline__ int BlockScanInclusive(int value)

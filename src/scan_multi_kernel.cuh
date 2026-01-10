@@ -10,8 +10,7 @@
 // ============================================================================
 // KERNEL: SCAN TILES (SHARED MEMORY BASELINE)
 // ============================================================================
-// Double-buffered shared memory scan. Included for comparison only.
-// Warp shuffle version below is faster.
+// Double-buffered shared memory scan.
 
 template<int BLOCK_SIZE>
 __global__ void ScanTilesSMEM(

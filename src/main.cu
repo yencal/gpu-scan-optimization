@@ -6,7 +6,7 @@
 
 #include "utils.cuh"
 #include "scan_multi_kernel.cuh"
-// #include "scan_chained.cuh"
+#include "scan_chained.cuh"
 // #include "scan_lookback.cuh"
 
 int main(int argc, char** argv)
@@ -53,8 +53,8 @@ int main(int argc, char** argv)
     // Single-pass approaches
     // ========================================================================
 
-    // RunBenchmark<ScanChained<BLOCK_SIZE>>(
-    //     "Chained scan (serialized)", n, peak_bandwidth);
+    RunBenchmark<ScanChained<BLOCK_SIZE>>(
+        "Chained scan (serialized)", n, peak_bandwidth);
 
     // RunBenchmark<ScanLookbackSingleThread<BLOCK_SIZE>>(
     //     "Lookback (single-thread)", n, peak_bandwidth);
