@@ -65,14 +65,14 @@ int main(int argc, char** argv)
     // Coarsening sweep
     // ========================================================================
 
-    RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, 2>>(
-        "Lookback (warp + coarsened x2)", n, peak_bandwidth);
+    // RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, 2>>(
+    //     "Lookback (warp + coarsened x2)", n, peak_bandwidth);
 
-    RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, 4>>(
-        "Lookback (warp + coarsened x4)", n, peak_bandwidth);
+    // RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, 4>>(
+    //     "Lookback (warp + coarsened x4)", n, peak_bandwidth);
 
-    RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, 8>>(
-        "Lookback (warp + coarsened x8)", n, peak_bandwidth);
+    // RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, 8>>(
+    //     "Lookback (warp + coarsened x8)", n, peak_bandwidth);
 
     // ========================================================================
     // Vectorized (int4) sweep
@@ -93,7 +93,7 @@ int main(int argc, char** argv)
     // ========================================================================
     // CUB DeviceScan
     // ========================================================================
-    
+
     RunBenchmark<ScanCUB>(
         "CUB DeviceScan", n, peak_bandwidth);
 
