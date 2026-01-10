@@ -11,7 +11,7 @@
 
 int main(int argc, char** argv)
 {
-    constexpr int BLOCK_SIZE = 256;
+    constexpr int BLOCK_SIZE = 512;
 
     // Default: 2^28 elements (~1GB for int32)
     int power = 28;
