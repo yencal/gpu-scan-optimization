@@ -1,3 +1,4 @@
+// scan_chained.cuh
 #pragma once
 
 template<int BLOCK_SIZE>

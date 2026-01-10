@@ -1,9 +1,10 @@
-// scan_benchmark.cu
+// main.cu
 // Test infrastructure for comparing scan algorithms
 
 #include <iostream>
 #include <cuda_runtime.h>
 #include <vector>
+#include <utils.cuh>
 
 #define CHECK_CUDA(val) check((val), #val, __FILE__, __LINE__)
 void check(cudaError_t err, const char* const func, const char* const file,
@@ -110,6 +111,13 @@ static __device__ __forceinline__ int BlockScan(int value)
     int warp_prefix = (wid > 0) ? smem[wid - 1] : 0;
     int block_scan = warp_scan + warp_prefix;
     return block_scan;
+}
+
+template<int BLOCK_SIZE>
+static __device__ __forceinline__ int BlockScanExclusive(int value)
+{
+    int inclusive = BlockScan<BLOCK_SIZE>(value);
+    return inclusive - value;
 }
 
 // ============================================================================
