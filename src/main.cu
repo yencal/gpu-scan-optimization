@@ -11,7 +11,7 @@
 
 int main(int argc, char** argv)
 {
-    constexpr int BLOCK_SIZE = 512;
+    constexpr int BLOCK_SIZE = 256;
 
     // Default: 2^28 elements (~1GB for int32)
     int power = 28;
@@ -72,6 +72,19 @@ int main(int argc, char** argv)
 
     RunBenchmark<ScanLookbackWarpCoarsened<BLOCK_SIZE, 8>>(
         "Lookback (warp + coarsened x8)", n, peak_bandwidth);
+
+    // ========================================================================
+    // Vectorized (int4) sweep
+    // ========================================================================
+
+    RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 1>>(
+        "Lookback (warp + vectorized x4)", n, peak_bandwidth);
+
+    RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 2>>(
+        "Lookback (warp + vectorized x8)", n, peak_bandwidth);
+
+    RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 3>>(
+        "Lookback (warp + vectorized x12)", n, peak_bandwidth);
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "Benchmark complete" << std::endl;
