@@ -20,6 +20,7 @@
 // ============================================================================
 // KERNEL: INITIALIZATION OF BUFFERS
 // ============================================================================
+// tile_descriptors and tile_counter buffer are initialized to zero
 
 template<int BLOCK_SIZE>
 __global__ void InitTileState(TileDescriptor* tile_descriptors, int* tile_counter, int num_tiles) {
