@@ -587,11 +587,16 @@ struct ScanLookbackSingleThread {
         const int num_tiles = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
         // Reset state (required before each run)
-        CHECK_CUDA(cudaMemset(d_temp, 0, GetTempSize(n)));
+        // CHECK_CUDA(cudaMemset(d_temp, 0, GetTempSize(n)));
 
         // Carve out temp buffer
         TileDescriptor* d_tile_descriptors = static_cast<TileDescriptor*>(d_temp);
         int* d_tile_counter = reinterpret_cast<int*>(d_tile_descriptors + num_tiles);
+
+        // Init buffers
+        const int max_grid_size = 1024;
+        const int init_grid = min((num_tiles + BLOCK_SIZE - 1) / BLOCK_SIZE, max_grid_size);
+        InitTileState<BLOCK_SIZE><<<init_grid, BLOCK_SIZE>>>(d_tile_descriptors, d_tile_counter, num_tiles);
 
         ScanLookbackSingleThreadKernel<BLOCK_SIZE><<<num_tiles, BLOCK_SIZE>>>(
             d_input, d_output, n, d_tile_descriptors, d_tile_counter);
@@ -610,7 +615,12 @@ struct ScanLookbackWarp {
         const int num_tiles = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
         // Reset state (required before each run)
-        CHECK_CUDA(cudaMemset(d_temp, 0, GetTempSize(n)));
+        // CHECK_CUDA(cudaMemset(d_temp, 0, GetTempSize(n)));
+
+        // Init buffers
+        const int max_grid_size = 1024;
+        const int init_grid = min((num_tiles + BLOCK_SIZE - 1) / BLOCK_SIZE, max_grid_size);
+        InitTileState<BLOCK_SIZE><<<init_grid, BLOCK_SIZE>>>(d_tile_descriptors, d_tile_counter, num_tiles);
 
         // Carve out temp buffer
         TileDescriptor* d_tile_descriptors = static_cast<TileDescriptor*>(d_temp);
@@ -635,11 +645,16 @@ struct ScanLookbackWarpCoarsened {
         const int num_tiles = (n + TILE_SIZE - 1) / TILE_SIZE;
 
         // Reset state (required before each run)
-        CHECK_CUDA(cudaMemset(d_temp, 0, GetTempSize(n)));
+        // CHECK_CUDA(cudaMemset(d_temp, 0, GetTempSize(n)));
 
         // Carve out temp buffer
         TileDescriptor* d_tile_descriptors = static_cast<TileDescriptor*>(d_temp);
         int* d_tile_counter = reinterpret_cast<int*>(d_tile_descriptors + num_tiles);
+
+        // Init buffers
+        const int max_grid_size = 1024;
+        const int init_grid = min((num_tiles + BLOCK_SIZE - 1) / BLOCK_SIZE, max_grid_size);
+        InitTileState<BLOCK_SIZE><<<init_grid, BLOCK_SIZE>>>(d_tile_descriptors, d_tile_counter, num_tiles);
 
         ScanLookbackWarpCoarsenedKernel<BLOCK_SIZE, ITEMS_PER_THREAD><<<num_tiles, BLOCK_SIZE>>>(
             d_input, d_output, n, d_tile_descriptors, d_tile_counter);
@@ -660,7 +675,7 @@ struct ScanLookbackWarpCoarsenedVectorized {
     static void Run(int* d_input, int* d_output, int n, void* d_temp) {
         const int num_tiles = (n + TILE_SIZE - 1) / TILE_SIZE;
 
-        // // Reset state (required before each run)
+        // Reset state (required before each run)
         // CHECK_CUDA(cudaMemset(d_temp, 0, GetTempSize(n)));
 
         // Carve out temp buffer
