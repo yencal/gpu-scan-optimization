@@ -78,16 +78,16 @@ int main(int argc, char** argv)
     // Vectorized (int4) sweep
     // ========================================================================
 
-    RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 1>>(
+    RunBenchmark<ScanLookbackWarpCoarsenedVectorized<BLOCK_SIZE, 1>>(
         "Lookback (warp + vectorized x4)", n, peak_bandwidth);
 
-    RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 2>>(
+    RunBenchmark<ScanLookbackWarpCoarsenedVectorized<BLOCK_SIZE, 2>>(
         "Lookback (warp + vectorized x8)", n, peak_bandwidth);
 
-    RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 3>>(
+    RunBenchmark<ScanLookbackWarpCoarsenedVectorized<BLOCK_SIZE, 3>>(
         "Lookback (warp + vectorized x12)", n, peak_bandwidth);
 
-    RunBenchmark<ScanLookbackWarpVectorized<BLOCK_SIZE, 4>>(
+    RunBenchmark<ScanLookbackWarpCoarsenedVectorized<BLOCK_SIZE, 4>>(
         "Lookback (warp + vectorized x16)", n, peak_bandwidth);
 
     // ========================================================================

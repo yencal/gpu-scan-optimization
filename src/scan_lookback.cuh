@@ -17,6 +17,18 @@
 #include "scan_primitives.cuh"
 #include "tile_descriptor.cuh"
 
+template<int BLOCK_SIZE>
+__global__ void InitTileState(TileDescriptor* tile_descriptors, int* tile_counter, int num_tiles) {
+    for (int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x; 
+         idx < num_tiles; 
+         idx += gridDim.x * BLOCK_SIZE) {
+        tile_descriptors[idx].raw = 0;
+    }
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        *tile_counter = 0;
+    }
+}
+
 // ============================================================================
 // KERNEL: DECOUPLED LOOKBACK (SINGLE THREAD)
 // ============================================================================
@@ -383,7 +395,7 @@ __global__ void ScanLookbackWarpCoarsenedKernel(
 // VEC_LOADS = number of int4 loads per thread (ITEMS_PER_THREAD = VEC_LOADS * 4)
 
 template<int BLOCK_SIZE, int VEC_LOADS>
-__global__ void ScanLookbackWarpVectorizedKernel(
+__global__ void ScanLookbackWarpCoarsenedVectorizedKernel(
     const int* __restrict__ input,
     int* __restrict__ output,
     int n,
@@ -636,7 +648,7 @@ struct ScanLookbackWarpCoarsened {
 };
 
 template<int BLOCK_SIZE, int VEC_LOADS>
-struct ScanLookbackWarpVectorized {
+struct ScanLookbackWarpCoarsenedVectorized {
     static constexpr int ITEMS_PER_THREAD = VEC_LOADS * 4;
     static constexpr int TILE_SIZE = BLOCK_SIZE * ITEMS_PER_THREAD;
 
@@ -648,14 +660,19 @@ struct ScanLookbackWarpVectorized {
     static void Run(int* d_input, int* d_output, int n, void* d_temp) {
         const int num_tiles = (n + TILE_SIZE - 1) / TILE_SIZE;
 
-        // Reset state (required before each run)
-        CHECK_CUDA(cudaMemset(d_temp, 0, GetTempSize(n)));
+        // // Reset state (required before each run)
+        // CHECK_CUDA(cudaMemset(d_temp, 0, GetTempSize(n)));
 
         // Carve out temp buffer
         TileDescriptor* d_tile_descriptors = static_cast<TileDescriptor*>(d_temp);
         int* d_tile_counter = reinterpret_cast<int*>(d_tile_descriptors + num_tiles);
 
-        ScanLookbackWarpVectorizedKernel<BLOCK_SIZE, VEC_LOADS><<<num_tiles, BLOCK_SIZE>>>(
+        // Init buffers
+        const int max_grid_size = 1024;
+        const int init_grid = min((num_tiles + BLOCK_SIZE - 1) / BLOCK_SIZE, max_grid_size);
+        InitTileState<BLOCK_SIZE><<<init_grid, BLOCK_SIZE>>>(d_tile_descriptors, d_tile_counter, num_tiles);
+
+        ScanLookbackWarpCoarsenedVectorizedKernel<BLOCK_SIZE, VEC_LOADS><<<num_tiles, BLOCK_SIZE>>>(
             d_input, d_output, n, d_tile_descriptors, d_tile_counter);
         CHECK_CUDA(cudaGetLastError());
     }
