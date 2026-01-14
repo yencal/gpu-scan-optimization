@@ -394,9 +394,10 @@ __global__ void ScanLookbackWarpCoarsenedKernel(
 }
 
 // ============================================================================
-// KERNEL: DECOUPLED LOOKBACK (WARP + VECTORIZED)
+// KERNEL: DECOUPLED LOOKBACK (WARP + VECTORIZED + COALESCED)
 // ============================================================================
-// Uses int4 loads/stores for better memory throughput.
+// Uses striped memory access pattern for coalesced loads/stores.
+// Transposes between striped (for memory) and blocked (for scan) layouts.
 // VEC_LOADS = number of int4 loads per thread (ITEMS_PER_THREAD = VEC_LOADS * 4)
 
 template<int BLOCK_SIZE, int VEC_LOADS>
@@ -413,6 +414,7 @@ __global__ void ScanLookbackWarpCoarsenedVectorizedKernel(
     __shared__ int s_tile_idx;
     __shared__ int s_tile_aggregate;
     __shared__ int s_prefix;
+    __shared__ int s_exchange[TILE_SIZE];
 
     // Step 1: Claim tile index
     if (threadIdx.x == 0) {
@@ -423,55 +425,62 @@ __global__ void ScanLookbackWarpCoarsenedVectorizedKernel(
     const int tile_idx = s_tile_idx;
     const int tile_offset = tile_idx * TILE_SIZE;
 
-    // Step 2: Load using int4 (vectorized, blocked layout)
+    // Step 2: Load using int4 with STRIPED access pattern (coalesced)
+    // Thread t loads elements at positions: t*4, t*4+1, t*4+2, t*4+3, (t+BLOCK_SIZE)*4, ...
+    // Consecutive threads access consecutive int4s -> coalesced
     int items[ITEMS_PER_THREAD];
     const int4* input_vec = reinterpret_cast<const int4*>(input + tile_offset);
 
-    if (tile_offset + TILE_SIZE <= n) {
-        // Fast path: full tile, no bounds checks
-        #pragma unroll
-        for (int v = 0; v < VEC_LOADS; v++) {
-            const int vec_idx = threadIdx.x * VEC_LOADS + v;
+    #pragma unroll
+    for (int v = 0; v < VEC_LOADS; v++) {
+        const int vec_idx = threadIdx.x + v * BLOCK_SIZE;  // Striped: stride by BLOCK_SIZE
+        const int base_idx = tile_offset + vec_idx * 4;
+
+        if (base_idx + 3 < n) {
             int4 loaded = input_vec[vec_idx];
             items[v * 4 + 0] = loaded.x;
             items[v * 4 + 1] = loaded.y;
             items[v * 4 + 2] = loaded.z;
             items[v * 4 + 3] = loaded.w;
-        }
-    } else {
-        // Slow path: last tile only, with bounds checks
-        #pragma unroll
-        for (int v = 0; v < VEC_LOADS; v++) {
-            const int vec_idx = threadIdx.x * VEC_LOADS + v;
-            const int base_idx = tile_offset + vec_idx * 4;
-
-            if (base_idx + 3 < n) {
-                int4 loaded = input_vec[vec_idx];
-                items[v * 4 + 0] = loaded.x;
-                items[v * 4 + 1] = loaded.y;
-                items[v * 4 + 2] = loaded.z;
-                items[v * 4 + 3] = loaded.w;
-            } else {
-                #pragma unroll
-                for (int i = 0; i < 4; i++) {
-                    const int idx = base_idx + i;
-                    items[v * 4 + i] = (idx < n) ? input[idx] : 0;
-                }
+        } else {
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                const int idx = base_idx + i;
+                items[v * 4 + i] = (idx < n) ? input[idx] : 0;
             }
         }
     }
 
-    // Step 3: Thread-local inclusive scan
+    // Step 3: Transpose STRIPED -> BLOCKED via shared memory
+    // Write to smem at the position corresponding to the input element index
+    #pragma unroll
+    for (int v = 0; v < VEC_LOADS; v++) {
+        const int smem_idx = (threadIdx.x + v * BLOCK_SIZE) * 4;
+        s_exchange[smem_idx + 0] = items[v * 4 + 0];
+        s_exchange[smem_idx + 1] = items[v * 4 + 1];
+        s_exchange[smem_idx + 2] = items[v * 4 + 2];
+        s_exchange[smem_idx + 3] = items[v * 4 + 3];
+    }
+    __syncthreads();
+
+    // Read from smem in blocked order (consecutive elements per thread)
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        items[i] = s_exchange[threadIdx.x * ITEMS_PER_THREAD + i];
+    }
+    __syncthreads();
+
+    // Step 4: Thread-local inclusive scan (blocked layout)
     #pragma unroll
     for (int i = 1; i < ITEMS_PER_THREAD; i++) {
         items[i] += items[i - 1];
     }
 
-    // Step 4: BlockScan on thread totals
+    // Step 5: BlockScan on thread totals
     const int thread_total = items[ITEMS_PER_THREAD - 1];
     const int thread_prefix = BlockScanExclusive<BLOCK_SIZE>(thread_total);
 
-    // Step 5: Add thread prefix to all items
+    // Step 6: Add thread prefix to all items
     #pragma unroll
     for (int i = 0; i < ITEMS_PER_THREAD; i++) {
         items[i] += thread_prefix;
@@ -483,7 +492,7 @@ __global__ void ScanLookbackWarpCoarsenedVectorizedKernel(
     }
     __syncthreads();
 
-    // Step 6: Warp 0 does the decoupled lookback
+    // Step 7: Warp 0 does the decoupled lookback
     const int warp_idx = threadIdx.x / warpSize;
     const int lane = threadIdx.x % warpSize;
 
@@ -562,42 +571,52 @@ __global__ void ScanLookbackWarpCoarsenedVectorizedKernel(
     }
     __syncthreads();
 
-    // Step 7: Add global prefix and store using int4 (vectorized)
+    // Step 8: Add global prefix to all items
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        items[i] += s_prefix;
+    }
+
+    // Step 9: Transpose BLOCKED -> STRIPED via shared memory
+    // Write to smem in blocked order
+    #pragma unroll
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        s_exchange[threadIdx.x * ITEMS_PER_THREAD + i] = items[i];
+    }
+    __syncthreads();
+
+    // Read from smem in striped order
+    #pragma unroll
+    for (int v = 0; v < VEC_LOADS; v++) {
+        const int smem_idx = (threadIdx.x + v * BLOCK_SIZE) * 4;
+        items[v * 4 + 0] = s_exchange[smem_idx + 0];
+        items[v * 4 + 1] = s_exchange[smem_idx + 1];
+        items[v * 4 + 2] = s_exchange[smem_idx + 2];
+        items[v * 4 + 3] = s_exchange[smem_idx + 3];
+    }
+    __syncthreads();
+
+    // Step 10: Store using int4 with STRIPED access pattern (coalesced)
     int4* output_vec = reinterpret_cast<int4*>(output + tile_offset);
 
-    if (tile_offset + TILE_SIZE <= n) {
-        // Fast path: full tile, no bounds checks
-        #pragma unroll
-        for (int v = 0; v < VEC_LOADS; v++) {
-            const int vec_idx = threadIdx.x * VEC_LOADS + v;
-            int4 result;
-            result.x = s_prefix + items[v * 4 + 0];
-            result.y = s_prefix + items[v * 4 + 1];
-            result.z = s_prefix + items[v * 4 + 2];
-            result.w = s_prefix + items[v * 4 + 3];
-            output_vec[vec_idx] = result;
-        }
-    } else {
-        // Slow path: last tile only, with bounds checks
-        #pragma unroll
-        for (int v = 0; v < VEC_LOADS; v++) {
-            const int vec_idx = threadIdx.x * VEC_LOADS + v;
-            const int base_idx = tile_offset + vec_idx * 4;
+    #pragma unroll
+    for (int v = 0; v < VEC_LOADS; v++) {
+        const int vec_idx = threadIdx.x + v * BLOCK_SIZE;  // Striped: stride by BLOCK_SIZE
+        const int base_idx = tile_offset + vec_idx * 4;
 
-            if (base_idx + 3 < n) {
-                int4 result;
-                result.x = s_prefix + items[v * 4 + 0];
-                result.y = s_prefix + items[v * 4 + 1];
-                result.z = s_prefix + items[v * 4 + 2];
-                result.w = s_prefix + items[v * 4 + 3];
-                output_vec[vec_idx] = result;
-            } else {
-                #pragma unroll
-                for (int i = 0; i < 4; i++) {
-                    const int idx = base_idx + i;
-                    if (idx < n) {
-                        output[idx] = s_prefix + items[v * 4 + i];
-                    }
+        if (base_idx + 3 < n) {
+            int4 result;
+            result.x = items[v * 4 + 0];
+            result.y = items[v * 4 + 1];
+            result.z = items[v * 4 + 2];
+            result.w = items[v * 4 + 3];
+            output_vec[vec_idx] = result;
+        } else {
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                const int idx = base_idx + i;
+                if (idx < n) {
+                    output[idx] = items[v * 4 + i];
                 }
             }
         }
