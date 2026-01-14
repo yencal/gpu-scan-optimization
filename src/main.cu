@@ -48,19 +48,6 @@ int main(int argc, char** argv)
     RunBenchmark<ScanMultiKernelWarp<BLOCK_SIZE>>(
         "Multi-kernel (Warp shuffle)", n, peak_bandwidth);
 
-    // Vectorized multi-kernel sweep
-    RunBenchmark<ScanMultiKernelWarpVec<BLOCK_SIZE, 1>>(
-        "Multi-kernel (warp + vec x4)", n, peak_bandwidth);
-
-    RunBenchmark<ScanMultiKernelWarpVec<BLOCK_SIZE, 2>>(
-        "Multi-kernel (warp + vec x8)", n, peak_bandwidth);
-
-    RunBenchmark<ScanMultiKernelWarpVec<BLOCK_SIZE, 3>>(
-        "Multi-kernel (warp + vec x12)", n, peak_bandwidth);
-
-    RunBenchmark<ScanMultiKernelWarpVec<BLOCK_SIZE, 4>>(
-        "Multi-kernel (warp + vec x16)", n, peak_bandwidth);
-
     // ========================================================================
     // Single-pass approaches
     // ========================================================================
