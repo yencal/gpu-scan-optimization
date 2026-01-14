@@ -35,6 +35,144 @@ __global__ void InitTileState(TileDescriptor* tile_descriptors, int* tile_counte
 }
 
 // ============================================================================
+// DEVICE FUNCTION: DECOUPLED LOOKBACK (SINGLE THREAD)
+// ============================================================================
+// Called by thread 0 only. Publishes aggregate, walks backward to find prefix,
+// then upgrades to PREFIX status.
+//
+// Returns: exclusive prefix (sum of all preceding tiles)
+
+static __device__ __forceinline__ int DecoupledLookbackSingleThread(
+    int tile_idx,
+    int tile_aggregate,
+    TileDescriptor* tile_descriptors)
+{
+    // Publish aggregate immediately (don't wait!)
+    TileDescriptor my_info;
+    my_info.value = tile_aggregate;
+    my_info.status = (tile_idx == 0) ? TileStatus::PREFIX : TileStatus::AGGREGATE;
+    atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
+    __threadfence();
+
+    if (tile_idx == 0) {
+        return 0;
+    }
+
+    int lookback_idx = tile_idx - 1;
+    int running_prefix = 0;
+
+    // Lookback loop: walk backward until we find PREFIX
+    while (lookback_idx >= 0) {
+        TileDescriptor pred_info;
+
+        // Spin-wait for valid data
+        do {
+            pred_info.raw = atomicAdd(&tile_descriptors[lookback_idx].raw, 0);
+        } while (pred_info.status == TileStatus::INVALID);
+
+        running_prefix += pred_info.value;
+
+        if (pred_info.status == TileStatus::PREFIX) {
+            break;
+        }
+        lookback_idx--;
+    }
+
+    // Upgrade to PREFIX
+    my_info.value = running_prefix + tile_aggregate;
+    my_info.status = TileStatus::PREFIX;
+    atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
+    __threadfence();
+
+    return running_prefix;
+}
+
+// ============================================================================
+// DEVICE FUNCTION: DECOUPLED LOOKBACK (WARP)
+// ============================================================================
+// Called by warp 0 only (all 32 lanes must participate).
+// Publishes aggregate, uses warp-parallel lookback to find prefix,
+// then upgrades to PREFIX status.
+//
+// Returns: exclusive prefix (sum of all preceding tiles)
+//          All lanes return the same value.
+
+static __device__ __forceinline__ int DecoupledLookbackWarp(
+    int tile_idx,
+    int tile_aggregate,
+    TileDescriptor* tile_descriptors)
+{
+    const int lane = threadIdx.x % warpSize;
+
+    // Publish aggregate (lane 0 writes)
+    if (lane == 0) {
+        TileDescriptor my_info;
+        my_info.value = tile_aggregate;
+        my_info.status = (tile_idx == 0) ? TileStatus::PREFIX : TileStatus::AGGREGATE;
+        atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
+        __threadfence();
+    }
+    __syncwarp();
+
+    if (tile_idx == 0) {
+        return 0;
+    }
+
+    int exclusive_prefix = 0;
+    int lookback_base = tile_idx - 1;
+
+    while (true) {
+        // Each lane checks a different predecessor
+        const int my_lookback_idx = lookback_base - lane;
+
+        TileDescriptor pred_info;
+        pred_info.value = 0;
+        pred_info.status = TileStatus::PREFIX;  // Default for out-of-bounds
+
+        if (my_lookback_idx >= 0) {
+            do {
+                pred_info.raw = atomicAdd(&tile_descriptors[my_lookback_idx].raw, 0);
+            } while (pred_info.status == TileStatus::INVALID);
+        }
+
+        // Find which lanes found PREFIX
+        const unsigned prefix_mask = __ballot_sync(0xFFFFFFFF, 
+            pred_info.status == TileStatus::PREFIX);
+        const int prefix_lane = __ffs(prefix_mask) - 1;  // -1 if none found
+
+        // Include all lanes if no PREFIX found, otherwise lanes 0..prefix_lane
+        int contribution = (prefix_lane < 0 || lane <= prefix_lane) ? pred_info.value : 0;
+
+        // XOR reduction - all lanes get the sum
+        #pragma unroll
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+            contribution += __shfl_xor_sync(0xFFFFFFFF, contribution, offset);
+        }
+
+        exclusive_prefix += contribution;
+
+        // If we found any PREFIX, we're done
+        if (prefix_lane >= 0) {
+            break;
+        }
+
+        // All 32 were AGGREGATE, continue to earlier tiles
+        lookback_base -= warpSize;
+    }
+
+    // Lane 0 upgrades to PREFIX
+    if (lane == 0) {
+        TileDescriptor my_info;
+        my_info.value = exclusive_prefix + tile_aggregate;
+        my_info.status = TileStatus::PREFIX;
+        atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
+        __threadfence();
+    }
+
+    return exclusive_prefix;
+}
+
+// ============================================================================
 // KERNEL: DECOUPLED LOOKBACK (SINGLE THREAD)
 // ============================================================================
 // One thread per tile does the lookback. Simpler but slower for deep chains.
@@ -72,46 +210,7 @@ __global__ void ScanLookbackSingleThreadKernel(
 
     // Step 3: Thread 0 does the decoupled lookback
     if (threadIdx.x == 0) {
-        const int tile_aggregate = s_tile_aggregate;
-
-        // Publish aggregate immediately (don't wait!)
-        TileDescriptor my_info;
-        my_info.value = tile_aggregate;
-        my_info.status = (tile_idx == 0) ? TileStatus::PREFIX : TileStatus::AGGREGATE;
-        atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
-        __threadfence();
-
-        if (tile_idx == 0) {
-            s_prefix = 0;
-        } else {
-            int lookback_idx = tile_idx - 1;
-            int running_prefix = 0;
-
-            // Lookback loop: walk backward until we find PREFIX
-            while (lookback_idx >= 0) {
-                TileDescriptor pred_info;
-
-                // Spin-wait for valid data
-                do {
-                    pred_info.raw = atomicAdd(&tile_descriptors[lookback_idx].raw, 0);
-                } while (pred_info.status == TileStatus::INVALID);
-
-                running_prefix += pred_info.value;
-
-                if (pred_info.status == TileStatus::PREFIX) {
-                    break;
-                }
-                lookback_idx--;
-            }
-
-            s_prefix = running_prefix;
-
-            // Upgrade to PREFIX
-            my_info.value = running_prefix + tile_aggregate;
-            my_info.status = TileStatus::PREFIX;
-            atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
-            __threadfence();
-        }
+        s_prefix = DecoupledLookbackSingleThread(tile_idx, s_tile_aggregate, tile_descriptors);
     }
     __syncthreads();
 
@@ -160,79 +259,11 @@ __global__ void ScanLookbackWarpKernel(
 
     // Step 3: Warp 0 does the decoupled lookback
     const int warp_idx = threadIdx.x / warpSize;
-    const int lane = threadIdx.x % warpSize;
 
     if (warp_idx == 0) {
-        const int tile_aggregate = s_tile_aggregate;
-
-        // Publish aggregate (thread 0 writes)
+        const int exclusive_prefix = DecoupledLookbackWarp(tile_idx, s_tile_aggregate, tile_descriptors);
         if (threadIdx.x == 0) {
-            TileDescriptor my_info;
-            my_info.value = tile_aggregate;
-            my_info.status = (tile_idx == 0) ? TileStatus::PREFIX : TileStatus::AGGREGATE;
-            atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
-            __threadfence();
-        }
-        __syncwarp();
-
-        if (tile_idx == 0) {
-            if (threadIdx.x == 0) {
-                s_prefix = 0;
-            }
-        } else {
-            int exclusive_prefix = 0;
-            int lookback_base = tile_idx - 1;
-
-            while (true) {
-                // Each lane checks a different predecessor
-                const int my_lookback_idx = lookback_base - lane;
-
-                TileDescriptor pred_info;
-                pred_info.value = 0;
-                pred_info.status = TileStatus::PREFIX;  // Default for out-of-bounds
-
-                if (my_lookback_idx >= 0) {
-                    do {
-                        pred_info.raw = atomicAdd(&tile_descriptors[my_lookback_idx].raw, 0);
-                    } while (pred_info.status == TileStatus::INVALID);
-                }
-
-                // Find which lanes found PREFIX
-                const unsigned prefix_mask = __ballot_sync(0xFFFFFFFF, 
-                    pred_info.status == TileStatus::PREFIX);
-                const int prefix_lane = __ffs(prefix_mask) - 1;  // -1 if none found
-
-                // Include all lanes if no PREFIX found, otherwise lanes 0..prefix_lane
-                int contribution = (prefix_lane < 0 || lane <= prefix_lane) ? pred_info.value : 0;
-
-                // XOR reduction - all lanes get the sum
-                #pragma unroll
-                for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-                    contribution += __shfl_xor_sync(0xFFFFFFFF, contribution, offset);
-                }
-
-                exclusive_prefix += contribution;
-
-                // If we found any PREFIX, we're done
-                if (prefix_lane >= 0) {
-                    break;
-                }
-
-                // All 32 were AGGREGATE, continue to earlier tiles
-                lookback_base -= warpSize;
-            }
-
-            // Thread 0 writes prefix to shared memory
-            if (threadIdx.x == 0) {
-                s_prefix = exclusive_prefix;
-
-                // Upgrade to PREFIX
-                TileDescriptor my_info;
-                my_info.value = exclusive_prefix + tile_aggregate;
-                my_info.status = TileStatus::PREFIX;
-                atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
-                __threadfence();
-            }
+            s_prefix = exclusive_prefix;
         }
     }
     __syncthreads();
@@ -306,79 +337,11 @@ __global__ void ScanLookbackWarpCoarsenedKernel(
 
     // Step 6: Warp 0 does the decoupled lookback
     const int warp_idx = threadIdx.x / warpSize;
-    const int lane = threadIdx.x % warpSize;
 
     if (warp_idx == 0) {
-        const int tile_aggregate = s_tile_aggregate;
-
-        // Publish aggregate (thread 0 writes)
+        const int exclusive_prefix = DecoupledLookbackWarp(tile_idx, s_tile_aggregate, tile_descriptors);
         if (threadIdx.x == 0) {
-            TileDescriptor my_info;
-            my_info.value = tile_aggregate;
-            my_info.status = (tile_idx == 0) ? TileStatus::PREFIX : TileStatus::AGGREGATE;
-            atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
-            __threadfence();
-        }
-        __syncwarp();
-
-        if (tile_idx == 0) {
-            if (threadIdx.x == 0) {
-                s_prefix = 0;
-            }
-        } else {
-            int exclusive_prefix = 0;
-            int lookback_base = tile_idx - 1;
-
-            while (true) {
-                // Each lane checks a different predecessor
-                const int my_lookback_idx = lookback_base - lane;
-
-                TileDescriptor pred_info;
-                pred_info.value = 0;
-                pred_info.status = TileStatus::PREFIX;  // Default for out-of-bounds
-
-                if (my_lookback_idx >= 0) {
-                    do {
-                        pred_info.raw = atomicAdd(&tile_descriptors[my_lookback_idx].raw, 0);
-                    } while (pred_info.status == TileStatus::INVALID);
-                }
-
-                // Find which lanes found PREFIX
-                const unsigned prefix_mask = __ballot_sync(0xFFFFFFFF, 
-                    pred_info.status == TileStatus::PREFIX);
-                const int prefix_lane = __ffs(prefix_mask) - 1;  // -1 if none found
-
-                // Include all lanes if no PREFIX found, otherwise lanes 0..prefix_lane
-                int contribution = (prefix_lane < 0 || lane <= prefix_lane) ? pred_info.value : 0;
-
-                // XOR reduction - all lanes get the sum
-                #pragma unroll
-                for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-                    contribution += __shfl_xor_sync(0xFFFFFFFF, contribution, offset);
-                }
-
-                exclusive_prefix += contribution;
-
-                // If we found any PREFIX, we're done
-                if (prefix_lane >= 0) {
-                    break;
-                }
-
-                // All 32 were AGGREGATE, continue to earlier tiles
-                lookback_base -= warpSize;
-            }
-
-            // Thread 0 writes prefix to shared memory
-            if (threadIdx.x == 0) {
-                s_prefix = exclusive_prefix;
-
-                // Upgrade to PREFIX
-                TileDescriptor my_info;
-                my_info.value = exclusive_prefix + tile_aggregate;
-                my_info.status = TileStatus::PREFIX;
-                atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
-                __threadfence();
-            }
+            s_prefix = exclusive_prefix;
         }
     }
     __syncthreads();
@@ -472,79 +435,11 @@ __global__ void ScanLookbackWarpCoarsenedVectorizedKernel(
 
     // Step 6: Warp 0 does the decoupled lookback
     const int warp_idx = threadIdx.x / warpSize;
-    const int lane = threadIdx.x % warpSize;
 
     if (warp_idx == 0) {
-        const int tile_aggregate = s_tile_aggregate;
-
-        // Publish aggregate (thread 0 writes)
+        const int exclusive_prefix = DecoupledLookbackWarp(tile_idx, s_tile_aggregate, tile_descriptors);
         if (threadIdx.x == 0) {
-            TileDescriptor my_info;
-            my_info.value = tile_aggregate;
-            my_info.status = (tile_idx == 0) ? TileStatus::PREFIX : TileStatus::AGGREGATE;
-            atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
-            __threadfence();
-        }
-        __syncwarp();
-
-        if (tile_idx == 0) {
-            if (threadIdx.x == 0) {
-                s_prefix = 0;
-            }
-        } else {
-            int exclusive_prefix = 0;
-            int lookback_base = tile_idx - 1;
-
-            while (true) {
-                // Each lane checks a different predecessor
-                const int my_lookback_idx = lookback_base - lane;
-
-                TileDescriptor pred_info;
-                pred_info.value = 0;
-                pred_info.status = TileStatus::PREFIX;  // Default for out-of-bounds
-
-                if (my_lookback_idx >= 0) {
-                    do {
-                        pred_info.raw = atomicAdd(&tile_descriptors[my_lookback_idx].raw, 0);
-                    } while (pred_info.status == TileStatus::INVALID);
-                }
-
-                // Find which lanes found PREFIX
-                const unsigned prefix_mask = __ballot_sync(0xFFFFFFFF, 
-                    pred_info.status == TileStatus::PREFIX);
-                const int prefix_lane = __ffs(prefix_mask) - 1;  // -1 if none found
-
-                // Include all lanes if no PREFIX found, otherwise lanes 0..prefix_lane
-                int contribution = (prefix_lane < 0 || lane <= prefix_lane) ? pred_info.value : 0;
-
-                // XOR reduction - all lanes get the sum
-                #pragma unroll
-                for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-                    contribution += __shfl_xor_sync(0xFFFFFFFF, contribution, offset);
-                }
-
-                exclusive_prefix += contribution;
-
-                // If we found any PREFIX, we're done
-                if (prefix_lane >= 0) {
-                    break;
-                }
-
-                // All 32 were AGGREGATE, continue to earlier tiles
-                lookback_base -= warpSize;
-            }
-
-            // Thread 0 writes prefix to shared memory
-            if (threadIdx.x == 0) {
-                s_prefix = exclusive_prefix;
-
-                // Upgrade to PREFIX
-                TileDescriptor my_info;
-                my_info.value = exclusive_prefix + tile_aggregate;
-                my_info.status = TileStatus::PREFIX;
-                atomicExch(&tile_descriptors[tile_idx].raw, my_info.raw);
-                __threadfence();
-            }
+            s_prefix = exclusive_prefix;
         }
     }
     __syncthreads();
