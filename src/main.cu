@@ -14,8 +14,8 @@ int main(int argc, char** argv)
 {
     constexpr int BLOCK_SIZE = 512;
 
-    // Default: 2^28 elements (~1GB for int32)
-    int power = 28;
+    // Default: 2^30 int32 elements
+    int power = 30;
     
     if (argc >= 2) {
         power = std::atoi(argv[1]);
